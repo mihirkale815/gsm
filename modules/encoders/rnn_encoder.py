@@ -5,127 +5,97 @@ import torch.nn.functional as F
 import numpy as np
 
 class RNNEncoder(nn.Module):
-    def __init__(self,
-                 vocab_size,
-                 hidden_dim,
-                 embedding_dim,
-                 dropout,
-                 num_layers,
-                 pad_index,
-                 device,
-                 bidirectional,
-                 cell):
+    def __init__(self,args):
         super(RNNEncoder, self).__init__()
 
-        self.vocab_size = vocab_size
-        self.embedding_dim = embedding_dim
-        self.hidden_dim = hidden_dim
-        self.dropout = nn.Dropout(p=dropout)
-        self.num_layers = num_layers
-        self.pad_index = pad_index
-        self.device = device
-        self.bidirectional = bidirectional
+        self.book_vocab_size = args['book_vocab_size']
+        self.author_vocab_size = args['author_vocab_size']
+        self.embedding_dim = args['embedding_dim']
+        self.hidden_dim = args['hidden_dim']
+        self.dropout = nn.Dropout(p=args['dropout'])
+        self.num_layers = args['num_layers']
+        self.pad_index = args['pad_index']
+        self.device = args['device']
+        self.book_embedding_layer = nn.Embedding(self.book_vocab_size, self.embedding_dim)
+        self.author_embedding_layer = nn.Embedding(self.author_vocab_size, self.embedding_dim)
+        self.rnn_input_dim = 2*self.embedding_dim
 
-        self.embedding_layer = nn.Embedding(self.vocab_size, self.embedding_dim)
-        if self.bidirectional : self.W = nn.Linear(2*self.hidden_dim, self.embedding_dim)
 
-        if cell == 'lstm' :
-            self.rnn = nn.LSTM(self.embedding_dim,
+
+        self.rnn = nn.LSTM(self.rnn_input_dim,
                                self.hidden_dim,
                                batch_first=True,
-                               bidirectional=self.bidirectional,
                                num_layers=self.num_layers)
-        else : raise  NotImplementedError(cell,"not implemented")
 
+        self.BOOK_TASK_ID = 'book'
+        self.AUTHOR_TASK_ID = 'author'
 
     def forward(self, batch):
         lens = batch['lens']
-        sequences = batch['inputs']
-
-        embeddings = self.embedding_layer(sequences)
-        embeddings = self.dropout(embeddings)
-
+        book_sequences = batch[self.BOOK_TASK_ID]['inputs']
+        author_sequences = batch[self.AUTHOR_TASK_ID]['inputs']
+        book_embeddings = self.book_embedding_layer(book_sequences)
+        author_embeddings = self.author_embedding_layer(author_sequences)
+        book_embeddings = self.dropout(book_embeddings)
+        author_embeddings = self.dropout(author_embeddings)
+        embeddings = torch.cat([book_embeddings, author_embeddings], dim=2)
         packed_input = pack_padded_sequence(embeddings, lens, batch_first=True)
         packed_hidden_states, _ = self.rnn(packed_input)
         hidden_states, _ = pad_packed_sequence(packed_hidden_states, batch_first=True)
         hidden_states = self.dropout(hidden_states)
 
-        if self.bidirectional : hidden_states = self.W(hidden_states)
+        output = {}
+        output['hidden_states'] = hidden_states
+        return output
 
-        return hidden_states
+
+
+class MovieRNNEncoder(nn.Module):
+    def __init__(self,args):
+        super(MovieRNNEncoder, self).__init__()
+
+        self.movie_vocab_size = args['movie_vocab_size']
+        self.genre_vocab_size = args['genre_vocab_size']
+        self.movie_embedding_dim = args['movie_embedding_dim']
+        self.genre_embedding_dim = args['genre_embedding_dim']
+        self.hidden_dim = args['hidden_dim']
+        self.dropout = nn.Dropout(p=args['dropout'])
+        self.num_layers = args['num_layers']
+        self.pad_index = args['pad_index']
+        self.device = args['device']
+        self.movie_embedding_layer = nn.Embedding(self.movie_vocab_size, self.movie_embedding_dim)
+        self.genre_embedding_layer = nn.Embedding(self.genre_vocab_size, self.genre_embedding_dim)
+        self.rnn_input_dim = self.movie_embedding_dim + self.genre_embedding_dim
 
 
 
-class HRNNEncoder(nn.Module):
-    def __init__(self,
-                 vocab_size,
-                 hidden_dim,
-                 embedding_dim,
-                 dropout,
-                 num_layers,
-                 pad_index,
-                 device,
-                 bidirectional,
-                 cell,
-                 kth=5):
-        super(HRNNEncoder, self).__init__()
-
-        self.vocab_size = vocab_size
-        self.embedding_dim = embedding_dim
-        self.hidden_dim = hidden_dim
-        self.dropout = nn.Dropout(p=dropout)
-        self.num_layers = num_layers
-        self.pad_index = pad_index
-        self.device = device
-        self.bidirectional = bidirectional
-        self.kth = kth
-
-        self.embedding_layer = nn.Embedding(self.vocab_size, self.embedding_dim)
-        self.W = nn.Linear(2*self.hidden_dim, self.embedding_dim)
-
-        if cell == 'lstm' :
-            self.rnn = nn.LSTM(self.embedding_dim,
+        self.rnn = nn.LSTM(self.rnn_input_dim,
                                self.hidden_dim,
                                batch_first=True,
-                               bidirectional=self.bidirectional,
                                num_layers=self.num_layers)
-            self.rnn2 = nn.LSTM(self.hidden_dim,
-                           self.hidden_dim,
-                           batch_first=True,
-                           bidirectional=self.bidirectional,
-                           num_layers=self.num_layers)
 
-        else : raise  NotImplementedError(cell,"not implemented")
-
+        self.MOVIE_TASK_ID = 'movie'
+        self.GENRE_TASK_ID = 'genre'
 
     def forward(self, batch):
         lens = batch['lens']
-        sequences = batch['inputs']
-
-        embeddings = self.embedding_layer(sequences)
-        embeddings = self.dropout(embeddings)
-
+        movie_sequences = batch[self.MOVIE_TASK_ID]['inputs']
+        genre_sequences = batch[self.GENRE_TASK_ID]['inputs']
+        movie_embeddings = self.movie_embedding_layer(movie_sequences)
+        genre_embeddings = self.genre_embedding_layer(genre_sequences)
+        genre_embeddings = torch.mean(genre_embeddings,dim=2)
+        movie_embeddings = self.dropout(movie_embeddings)
+        genre_embeddings = self.dropout(genre_embeddings)
+        embeddings = torch.cat([movie_embeddings, genre_embeddings], dim=2)
         packed_input = pack_padded_sequence(embeddings, lens, batch_first=True)
         packed_hidden_states, _ = self.rnn(packed_input)
         hidden_states, _ = pad_packed_sequence(packed_hidden_states, batch_first=True)
         hidden_states = self.dropout(hidden_states)
 
-        batch_size,max_len,_ = hidden_states.size()
-        ds_hidden_states = hidden_states[:,np.arange(0,max_len,self.kth),:]
-        packed_input = pack_padded_sequence(ds_hidden_states, [1 + k/self.kth for k in lens], batch_first=True)
-        packed_hidden_states, _ = self.rnn2(packed_input)
-        hidden_states_l2, _ = pad_packed_sequence(packed_hidden_states, batch_first=True)
-        hidden_states_l2 = self.dropout(hidden_states_l2)
+        output = {}
+        output['hidden_states'] = hidden_states
+        return output
 
-        _,max_len_l2,_ = hidden_states_l2.size()
-        hidden_states_l2_expanded = torch.zeros(hidden_states.size()).to(self.device)
-        for i in range(0,max_len_l2):
-            start= i*self.kth
-            end = min(start+self.kth,max_len)
-            hidden_states_l2_expanded[:,start:end,:] = hidden_states_l2[:,i:i+1,:]
 
-        hidden_states = torch.cat((hidden_states,hidden_states_l2_expanded),dim=2)
-        hidden_states = self.W(hidden_states)
 
-        return hidden_states
 

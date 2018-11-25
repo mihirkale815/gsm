@@ -1,7 +1,7 @@
 import sys
 sys.path.append("../srp")
 sys.path.append("../")
-from data.utils import DatasetContainer
+from data.utils import MovielensDatasetContainer
 import argparse
 import torch.optim as optim
 import torch
@@ -9,7 +9,7 @@ import os
 from torch import nn
 from mtl.modules.encoders import rnn_encoder,ff_encoder
 from mtl.modules.decoders import linear_decoder
-from models.lstm import SingleTaskModel,MultiTaskModel
+from models.lstm import SingleTaskMovieModel
 from utils import *
 import json
 
@@ -21,70 +21,79 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data_path = args.data_path
 
-    is_book_task = args.is_book_task
-    is_author_task = args.is_author_task
+    is_movie_task = args.is_movie_task
+    is_genre_task = args.is_genre_task
     is_weight_loss = args.is_weight_loss
     num_mos_decoders = args.num_mos_decoders
-    is_mtl = is_author_task and is_book_task
+    is_mtl = is_genre_task and is_movie_task
     task_ids = []
-    if is_author_task: task_ids.append('author')
-    if is_book_task: task_ids.append('book')
+    if is_genre_task: task_ids.append('genre')
+    if is_movie_task: task_ids.append('movie')
 
-    dataset_container = DatasetContainer(args.batch_size)
+    dataset_container = MovielensDatasetContainer(args.batch_size)
     dataset_container.load_sequences(data_path)
-    dataset_container.set_identifiers(is_book_task,is_author_task)
 
 
     exp_dir = os.path.join(args.exp_dir,str(args.model_id))
-    if not os.path.exists(exp_dir): os.makedirs(exp_dir)
+    dev_save_dir = os.path.join(exp_dir,"dev")
+    test_save_dir = os.path.join(exp_dir, "test")
+    if not os.path.exists(exp_dir):
+        os.makedirs(exp_dir)
+        os.makedirs(dev_save_dir)
+        os.makedirs(test_save_dir)
     max_patience = args.patience
     model_path = os.path.join(exp_dir,"model.pt")
     log_path = os.path.join(exp_dir, "logs.txt")
 
 
-    book_vocab_size = len(dataset_container.book2id)
-    author_vocab_size = len(dataset_container.author2id)
+    movie_vocab_size = len(dataset_container.movie2id)
+    genre_vocab_size = len(dataset_container.genre2id)
 
     if args.encoder == 'rnn':
         encoder_args = {}
-        encoder_args['book_vocab_size'] = book_vocab_size
-        encoder_args['author_vocab_size'] = author_vocab_size
-        encoder_args['embedding_dim'] = args.embedding_dim
+        encoder_args['movie_vocab_size'] = movie_vocab_size
+        encoder_args['genre_vocab_size'] = genre_vocab_size
+        encoder_args['movie_embedding_dim'] = args.movie_embedding_dim
+        encoder_args['genre_embedding_dim'] = args.genre_embedding_dim
         encoder_args['hidden_dim'] = args.hidden_dim
         encoder_args['dropout'] = args.dropout
         encoder_args['num_layers'] = args.num_layers
         encoder_args['pad_index'] = args.pad_index
         encoder_args['device'] = device
-        encoder = rnn_encoder.RNNEncoder(encoder_args)
+        encoder = rnn_encoder.MovieRNNEncoder(encoder_args)
 
     decoder_args = {}
 
     if is_mtl:
-        decoder_args['book_input_dim'] = args.hidden_dim
-        decoder_args['author_input_dim'] = args.hidden_dim
-        decoder_args['book_output_dim'] = book_vocab_size
-        decoder_args['author_output_dim'] = author_vocab_size
-        decoder_args['book2author'] = dataset_container.book2author
-        decoder_args['combine_logits'] = args.combine_logits
-        decoder = linear_decoder.MultiTaskLinearDecoder(decoder_args)
-        model = MultiTaskModel(encoder, decoder).to(device)
+        pass
+        #decoder_args['movie_input_dim'] = args.hidden_dim
+        #decoder_args['genre_input_dim'] = args.hidden_dim
+        #decoder_args['book_output_dim'] = book_vocab_size
+        #decoder_args['author_output_dim'] = author_vocab_size
+        #decoder = linear_decoder.MultiTaskLinearDecoder(decoder_args)
+        #model = MultiTaskModel(encoder, decoder).to(device)
     else:
-        if is_book_task :
+        if is_movie_task :
             decoder_args['input_dim'] = args.hidden_dim
-            decoder_args['output_dim'] = book_vocab_size
-        elif is_author_task:
-            decoder_args['input_dim'] = args.hidden_dim
-            decoder_args['output_dim'] = author_vocab_size
+            decoder_args['output_dim'] = movie_vocab_size
             decoder_args['num_mos_decoders'] = num_mos_decoders
-        if num_mos_decoders > 1 : decoder = linear_decoder.MOSDecoder(decoder_args)
+            decoder_args['split_hidden'] = args.split_hidden
+
+        if args.decoder == 'mos' : decoder = linear_decoder.MOSDecoder(decoder_args)
+        elif args.decoder == 'moc': decoder = linear_decoder.MOCDecoder(decoder_args)
         else : decoder = linear_decoder.LinearDecoder(decoder_args)
-        model = SingleTaskModel(task_ids[0],encoder, decoder).to(device)
+        model_args = {}
+        model_args['tie_mixture_weights'] = args.tie_mixture_weights
+        model_args['tie_weights'] = args.tie_weights
+        model = SingleTaskMovieModel(task_ids[0],encoder, decoder,model_args).to(device)
 
     print(model)
     print_num_trainable_params(model)
 
-
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.learning_rate)
+    if args.optim == 'sgd':
+        optimizer = optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=args.learning_rate)
+    elif args.optim == 'adam':
+        optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.learning_rate)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.5, last_epoch=-1); scheduler.step()
 
     best_dev_metric = -float("inf")
@@ -112,7 +121,7 @@ def train(args):
                 output = model.compute_weighted_loss(batch)
             else : output = model.compute_loss(batch)
             loss = output['loss']
-            num_elements += batch['masks'].sum().item()
+            num_elements += batch[task_ids[0]]['masks'].sum().item()
             epoch_train_losses.append(loss.item())
 
             optimizer.zero_grad()
@@ -120,6 +129,8 @@ def train(args):
             optimizer.step()
             nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
             torch.cuda.empty_cache()
+
+            #if idx%10 == 0 : print("Completed %d batches" % (idx))
 
         hist_train_metrics.append(sum(epoch_train_losses)/num_elements)
         result = evaluate(model, dataset_container.batch_iterator('dev'),task_ids)
@@ -170,10 +181,10 @@ def train(args):
 #    result = evaluate(model, dataset_container.batch_iterator('train'),task_ids)
 #    print("TRAIN SET");display_results(result)
 
-    result = evaluate(model, dataset_container.batch_iterator('dev'),task_ids)
+    result = evaluate(model, dataset_container.batch_iterator('dev'),task_ids,dev_save_dir)
     print("DEV SET");display_results(result)
 
-    result = evaluate(model, dataset_container.batch_iterator('test'),task_ids)
+    result = evaluate(model, dataset_container.batch_iterator('test'),task_ids,test_save_dir)
     print("TEST SET"); display_results(result)
 
 
@@ -184,10 +195,16 @@ def train(args):
 def display_results(result):
     for task_id in result:
         metrics = result[task_id]['metrics']
-        hitrate10 = metrics['metrics']['hitrate'][10]
+        if 100 in  metrics['metrics']['hitrate'] :
+            hitrate100 = metrics['metrics']['hitrate'][100]
+        if 10  in metrics['metrics']['hitrate']:
+            hitrate10 = metrics['metrics']['hitrate'][10]
+        if 5 in metrics['metrics']['hitrate']:
+            hitrate5 = metrics['metrics']['hitrate'][5]
         loss = metrics['loss']
         print(task_id)
-        print("loss = %.2f hitrate@10 = %.2f" %(loss,100.0*hitrate10))
+        print("loss = %.2f hitrate@10 = %.2f " % (loss, 100.0 * hitrate10))
+        #print("loss = %.2f hitrate@100 = %.2f hitrate@10 = %.2f hitrate@5 = %.2f" %(loss,100.0*hitrate100,100.0*hitrate10,100.0*hitrate5))
     print("*"*50)
 
 

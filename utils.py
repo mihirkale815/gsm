@@ -4,18 +4,18 @@ import torch.nn as nn
 import numpy as np
 from collections import Counter,defaultdict
 import bottleneck
-
-
-def display_metrics(metrics,split):
-    print('>'*3,split,'<'*5)
-    for metric,val in metrics.items():
-        print(metric,val)
+import os
+import json
 
 
 def move_batch_to_device(batch):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    for key,val in batch.items():
-        if type(val) == torch.Tensor: batch[key] = val.to(device)
+    for k,d in batch.items():
+        if type(d) == torch.Tensor: batch[k] = d.to(device)
+        if type(d) == dict:
+            for key, val in d.items():
+                if type(val) == torch.Tensor: d[key] = val.to(device)
+            batch[k] = d
     return batch
 
 def calculate_metrics(actual,predicted,topklist=(10,)):
@@ -28,55 +28,64 @@ def calculate_hitrate(actual,predicted):
     correct = len([1 for act,pred in zip(actual,predicted) if act in pred])
     return float(correct)/len(actual)
 
-
-def sample_negatives_slow(predictions,targets):
-    num_samlpes, vocab_size = predictions.shape
-    sampled_predictions = np.zeros((num_samlpes, 100))
-    for idx, target in enumerate(targets):
-        candidates = [i for i in range(1, vocab_size) if i != target]
-        negatives = np.random.choice(candidates, 99, replace=False)
-        sampled_predictions[idx] = predictions[idx][np.append(target, negatives)]
-    return sampled_predictions
-
-def sample_negatives(predictions,targets,topk=10):
-    #implementation is wrong
-    num_samlpes, vocab_size = predictions.shape
-    rows = np.arange(num_samlpes).repeat(topk).reshape(num_samlpes, topk)
-    cols = np.random.randint(1,vocab_size,(num_samlpes, topk))
-    cols[:,0] = targets
-    return predictions[rows,cols],np.zeros(num_samlpes)
-
-def process_predictions(batch,predictions,topk = 10):
+def process_predictions(targets,predictions,masks,topk):
 
     batch_size, max_len, vocab_size = predictions.size()
-    n_rows,n_cols = batch_size*max_len,vocab_size
+    masks = masks.view(batch_size * max_len).detach().cpu().numpy()
+    targets = targets.view(batch_size * max_len).detach().cpu().numpy()
     predictions = predictions.view(batch_size * max_len, vocab_size).detach().cpu().numpy()
-    targets = batch['outputs'].view(batch_size * max_len).detach().cpu().numpy()
 
+    predictions = predictions[masks == 1]
+    targets = targets[masks==1]
+
+
+    n_rows, n_cols = predictions.shape
     topk_unsorted_indices = bottleneck.argpartition(-predictions,topk,axis=1)[:,0:topk]
-    rows = np.arange(n_rows).repeat(topk).reshape(n_rows,topk)
-    topk_indices_sorted_relative = predictions[rows,topk_unsorted_indices].argsort(axis=1)
-    topk_indices_sorted = topk_unsorted_indices[rows,topk_indices_sorted_relative]
+    #rows = np.arange(n_rows).repeat(topk).reshape(n_rows,topk)
+    #topk_indices_sorted_relative = predictions[rows,topk_unsorted_indices].argsort(axis=1)
+    #topk_indices_sorted = topk_unsorted_indices[rows,topk_indices_sorted_relative]
     #predictions = topk_indices_sorted
     predictions = topk_unsorted_indices
 
-    masks = batch['masks'].view(batch_size * max_len).detach().cpu().numpy()
-    predicted = predictions[masks == 1]
-    actual = targets[masks==1]
-    return actual,predicted
+    return targets,predictions
 
-def evaluate(model,dataset_iter):
+
+def evaluate(model,batch_iter,task_ids,save_path=None):
     torch.set_grad_enabled(False)
     model.eval()
-    predicted,actual = [],[]
-    for idx,batch in enumerate(dataset_iter):
+    all_predicted = {task_id:[] for task_id in task_ids}
+    all_targets = {task_id: [] for task_id in task_ids}
+    losses = {task_id: [] for task_id in task_ids}
+    num_elements = {task_id: 0 for task_id in task_ids}
+    for idx,batch in enumerate(batch_iter):
         batch = move_batch_to_device(batch)
-        predictions = model(batch)
-        act,pred = process_predictions(batch,predictions)
-        predicted.append(pred)
-        actual.append(act)
-    predicted = np.vstack(predicted)
-    actual = np.hstack(actual)
-    print("num interactions",predicted.shape, actual.shape)
-    metrics = calculate_metrics(actual,predicted)
-    return actual,predicted,metrics
+        output = model.compute_loss(batch)
+        for task_id in task_ids:
+            loss = output[task_id]['loss']
+            predictions = output[task_id]['logits']
+            targets = batch[task_id]['targets']
+            masks = batch[task_id]['masks']
+            losses[task_id].append(loss.item())
+            num_elements[task_id] += batch[task_id]['masks'].sum().item()
+            targs,preds = process_predictions(targets,predictions,masks,10)
+            all_predicted[task_id].append(preds)
+            all_targets[task_id].append(targs)
+
+    result = {}
+    for task_id in task_ids:
+        predicted = np.vstack(all_predicted[task_id])
+        targets = np.hstack(all_targets[task_id])
+        metrics = {'loss': sum(losses[task_id]) / num_elements[task_id],
+                   'metrics': calculate_metrics(targets, predicted)}
+        result[task_id] = {'predicted':predicted,'target':targets,'metrics':metrics}
+        if save_path:
+            persist_model_output(targets, predicted, metrics, save_path)
+    print("number of predictions = ",result[task_id]['target'].shape)
+    return result
+
+
+def persist_model_output(targets,predicted,metrics,save_path):
+    np.savez(os.path.join(save_path,"targets"),targets)
+    np.savez(os.path.join(save_path,"predicted"),predicted)
+    json.dump(metrics,open(os.path.join(save_path,"metrics"),"w"))
+

@@ -1,10 +1,11 @@
 import torch.nn as nn
 import torch
 
-def cross_entropy(actual,predicted,mask=None,pad_index=0):
-    batch_size, max_len, vocab_size = predicted.size()
+def cross_entropy(actual,predicted,mask,pad_index=0):
     actual = actual*mask
-    predicted = predicted.view(batch_size * max_len,vocab_size)
-    actual =  actual.view(batch_size * max_len)
-    loss = nn.CrossEntropyLoss(ignore_index=pad_index)(predicted,actual)
+    batch_size, max_len, vocab_size = predicted.size()
+    predicted = predicted.contiguous().view(batch_size * max_len,vocab_size)
+    actual =  actual.contiguous().view(batch_size * max_len)
+    loss = nn.CrossEntropyLoss(ignore_index=pad_index,reduction='sum')(predicted,actual)
     return loss
+
