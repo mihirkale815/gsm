@@ -42,7 +42,8 @@ def train(args):
         os.makedirs(dev_save_dir)
         os.makedirs(test_save_dir)
     max_patience = args.patience
-    model_path = os.path.join(exp_dir,"model.pt")
+    model_state_path = os.path.join(exp_dir,"model_state_dict.pt")
+    model_path = os.path.join(exp_dir, "model.pt")
     log_path = os.path.join(exp_dir, "logs.txt")
 
 
@@ -143,7 +144,8 @@ def train(args):
         if is_better:
             patience = 0
             print('save currently the best model to [%s]' % model_path)  # , file=sys.stderr)
-            torch.save(model.state_dict(), model_path)
+            torch.save(model.state_dict(), model_state_path)
+            torch.save(model, model_path)
 
             # You may also save the optimizer's state
         elif patience < max_patience:
