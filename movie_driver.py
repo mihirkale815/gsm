@@ -178,7 +178,7 @@ def train(args):
 
 
 
-    model.load_state_dict(torch.load(model_path))
+    model.load_state_dict(torch.load(model_state_path))
 
 #    result = evaluate(model, dataset_container.batch_iterator('train'),task_ids)
 #    print("TRAIN SET");display_results(result)
